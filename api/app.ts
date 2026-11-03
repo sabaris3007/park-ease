@@ -1,9 +1,9 @@
 import express, { Request, Response } from 'express';
-import { execSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { createRequire } from 'module';
+import { SCHEMA_SQL, SEED_SQL } from './dbData';
 
 const require = createRequire(import.meta.url);
 
@@ -11,21 +11,7 @@ const app = express();
 const IS_VERCEL = Boolean(process.env.VERCEL);
 const SEED_DB_PATH = path.resolve(process.cwd(), 'database', 'parking_system.db');
 const RUNTIME_DB_PATH = IS_VERCEL ? path.join('/tmp', 'parking_system.db') : SEED_DB_PATH;
-const SCHEMA_PATH = path.resolve(process.cwd(), 'database', 'seed.sql');
 const SALT = 'ParkEase_Secure_Salt_2026_DBMS';
-
-// On Vercel serverless environments, copy seed database to writable /tmp directory
-function ensureRuntimeDatabase() {
-  if (IS_VERCEL && !fs.existsSync(RUNTIME_DB_PATH)) {
-    try {
-      if (fs.existsSync(SEED_DB_PATH)) {
-        fs.copyFileSync(SEED_DB_PATH, RUNTIME_DB_PATH);
-      }
-    } catch (err) {
-      console.warn('[Vercel SQLite] Seed DB copy to /tmp failed, will create new DB:', err);
-    }
-  }
-}
 
 function hashPassword(password: string): string {
   return crypto.createHash('sha256').update(password + SALT).digest('hex');
@@ -37,60 +23,196 @@ interface UniversalDb {
   close(): void;
 }
 
-// Open (or create) the SQLite database using better-sqlite3 or Node.js built-in node:sqlite
-function openDb(): UniversalDb {
-  ensureRuntimeDatabase();
+let dbInstance: any = null;
+let initPromise: Promise<any> | null = null;
+
+// Universal SQLite Engine: Powered by WebAssembly SQLite (sql.js inline wasm).
+// Runs reliably on Vercel Serverless Functions, AWS Lambda, Linux, macOS, and Windows
+// with zero native C++ compile steps, no node-gyp, and zero missing binary issues.
+async function getDb(): Promise<any> {
+  if (dbInstance) return dbInstance;
+  if (!initPromise) {
+    initPromise = (async () => {
+      const initSqlJs = require('sql.js/dist/sql-wasm-inline.js');
+      const SQL = await initSqlJs();
+
+      // Check if persistent database exists on disk (e.g. /tmp on Vercel)
+      if (fs.existsSync(RUNTIME_DB_PATH)) {
+        try {
+          const fileBuffer = fs.readFileSync(RUNTIME_DB_PATH);
+          if (fileBuffer.length > 0) {
+            const loadedDb = new SQL.Database(fileBuffer);
+            const check = loadedDb.exec("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='parking_centres'");
+            if (check.length > 0 && check[0].values[0][0] > 0) {
+              dbInstance = loadedDb;
+              return dbInstance;
+            }
+          }
+        } catch (err) {
+          console.warn('[DB] Could not load existing DB file, creating fresh in-memory DB:', err);
+        }
+      }
+
+      // Initialize fresh SQLite database from embedded schema & seed data
+      const freshDb = new SQL.Database();
+      freshDb.run(SCHEMA_SQL);
+      freshDb.run(SEED_SQL);
+      dbInstance = freshDb;
+
+      // Persist to disk if directory is writable
+      persistDb();
+      return dbInstance;
+    })();
+  }
+  return initPromise;
+}
+
+// Trigger eager initialization
+getDb().catch((err) => console.error('[DB] Eager init failed:', err));
+
+function persistDb(): void {
+  if (!dbInstance) return;
   try {
-    const BetterSqlite = require('better-sqlite3');
-    const test = new BetterSqlite(':memory:');
-    test.close();
-    return new BetterSqlite(RUNTIME_DB_PATH);
+    const exported = dbInstance.export();
+    fs.mkdirSync(path.dirname(RUNTIME_DB_PATH), { recursive: true });
+    fs.writeFileSync(RUNTIME_DB_PATH, Buffer.from(exported));
   } catch {
-    const { DatabaseSync } = require('node:sqlite');
-    const syncDb = new DatabaseSync(RUNTIME_DB_PATH);
-    return {
-      exec: (sql: string) => syncDb.exec(sql),
-      prepare: (sql: string) => {
-        const stmt = syncDb.prepare(sql);
-        return {
-          all: () => stmt.all() as any[],
-          get: () => stmt.get() as any,
-          run: () => stmt.run() as any,
-        };
-      },
-      close: () => syncDb.close(),
-    };
+    // Non-fatal if filesystem is read-only
   }
 }
 
+// Open (or return) the SQLite database interface
+function openDb(): UniversalDb {
+  if (!dbInstance) {
+    throw new Error('Database not initialized yet.');
+  }
+  return {
+    exec: (sql: string) => {
+      dbInstance.run(sql);
+      persistDb();
+    },
+    prepare: (sql: string) => {
+      return {
+        all: () => {
+          const res = dbInstance.exec(sql);
+          if (!res || res.length === 0) return [];
+          const { columns, values } = res[0];
+          return values.map((row: any[]) => {
+            const obj: Record<string, any> = {};
+            columns.forEach((col: string, idx: number) => {
+              obj[col] = row[idx];
+            });
+            return obj;
+          });
+        },
+        get: () => {
+          const res = dbInstance.exec(sql);
+          if (!res || res.length === 0 || res[0].values.length === 0) return undefined;
+          const { columns, values } = res[0];
+          const obj: Record<string, any> = {};
+          columns.forEach((col: string, idx: number) => {
+            obj[col] = values[0][idx];
+          });
+          return obj;
+        },
+        run: () => {
+          dbInstance.run(sql);
+          persistDb();
+          return {};
+        },
+      };
+    },
+    close: () => {},
+  };
+}
+
+// CORS & Preflight Middleware
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
+// Vercel Path Normalization Middleware
+// Ensures req.url is properly resolved if Vercel serverless rewrites pass original paths
+app.use((req, _res, next) => {
+  const matchedPath = req.headers['x-matched-path'] as string;
+  if (matchedPath && matchedPath.startsWith('/api') && (req.url === '/' || req.url === '/api')) {
+    req.url = matchedPath;
+  }
+  next();
+});
+
 app.use(express.json());
+
+// Database readiness middleware: guarantees DB is loaded before handling requests
+app.use(async (_req, _res, next) => {
+  try {
+    await getDb();
+    next();
+  } catch (err: any) {
+    console.error('Database connection error:', err);
+    next(err);
+  }
+});
 
 // Helper function to safely execute SQLite SELECT queries returning rows
 function executeSqlJson(query: string): any[] {
-  const db = openDb();
-  try {
-    const stmt = db.prepare(query);
-    return stmt.all() as any[];
-  } catch (err: any) {
-    throw new Error(err.message || 'SQLite query execution failed');
-  } finally {
-    db.close();
+  if (!dbInstance) {
+    throw new Error('Database not initialized');
   }
+  const res = dbInstance.exec(query);
+  if (!res || res.length === 0) return [];
+  const { columns, values } = res[0];
+  return values.map((row: any[]) => {
+    const obj: Record<string, any> = {};
+    columns.forEach((col: string, idx: number) => {
+      obj[col] = row[idx];
+    });
+    return obj;
+  });
 }
 
 // Helper to run non-SELECT or DDL statements
 function executeSqlStatement(statement: string): void {
-  const db = openDb();
-  try {
-    db.exec(statement);
-  } catch (err: any) {
-    throw new Error(err.message || 'SQLite statement failed');
-  } finally {
-    db.close();
+  if (!dbInstance) {
+    throw new Error('Database not initialized');
   }
+  dbInstance.run(statement);
+  persistDb();
 }
 
 const api = express.Router();
+
+// Health Check & Root API Endpoints
+api.get('/health', (_req: Request, res: Response) => {
+  return res.json({ status: 'ok', service: 'ParkEase API', timestamp: new Date().toISOString() });
+});
+
+api.get('/', (_req: Request, res: Response) => {
+  return res.json({
+    status: 'ok',
+    service: 'ParkEase Smart Parking Management System API',
+    endpoints: [
+      '/api/centres',
+      '/api/slots/:centreId',
+      '/api/tickets',
+      '/api/users/login',
+      '/api/users/register',
+      '/api/users/:userId/dashboard',
+      '/api/users/:userId/vehicles',
+      '/api/reports/occupancy',
+      '/api/reports/revenue',
+      '/api/reports/transactions',
+      '/api/db/query',
+      '/api/db/schema'
+    ]
+  });
+});
 
 // -----------------------------------------------------------------------------
 // 1. DBMS & SQL API Endpoints
@@ -162,7 +284,7 @@ api.get('/db/schema', (_req: Request, res: Response) => {
       }
     }
 
-    const schemaDdl = fs.existsSync(SCHEMA_PATH) ? fs.readFileSync(SCHEMA_PATH, 'utf-8') : '';
+    const schemaDdl = SCHEMA_SQL;
 
     return res.json({
       success: true,
@@ -177,9 +299,15 @@ api.get('/db/schema', (_req: Request, res: Response) => {
 });
 
 // Reset Database to Fresh Initial Seed
-api.post('/db/reset', (_req: Request, res: Response) => {
+api.post('/db/reset', async (_req: Request, res: Response) => {
   try {
-    execSync('node scripts/init_database.js', { encoding: 'utf-8', cwd: process.cwd() });
+    const initSqlJs = require('sql.js/dist/sql-wasm-inline.js');
+    const SQL = await initSqlJs();
+    const freshDb = new SQL.Database();
+    freshDb.run(SCHEMA_SQL);
+    freshDb.run(SEED_SQL);
+    dbInstance = freshDb;
+    persistDb();
     return res.json({ success: true, message: 'SQLite database reset to initial 50 slots state.' });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -566,5 +694,5 @@ api.get('/reports/transactions', (_req: Request, res: Response) => {
 app.use('/api', api);
 app.use(api);
 
-export { openDb, executeSqlJson, executeSqlStatement, RUNTIME_DB_PATH };
+export { getDb, openDb, executeSqlJson, executeSqlStatement, RUNTIME_DB_PATH, persistDb };
 export default app;
