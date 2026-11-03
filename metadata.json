@@ -1,6 +1,5 @@
 {
-  "name": "ParkEase - Smart Parking Management System",
+  "name": "ParkEase - Smart Parking Lot Management System",
   "description": "Smart parking management system featuring nearby parking facility discovery with location-based bay capacities, live availability, and dynamic parking rates.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "requestFramePermissions": []
 }

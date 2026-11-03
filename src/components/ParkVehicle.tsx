@@ -10,7 +10,6 @@ import {
   User,
   CreditCard,
   Hash,
-  Sparkles,
   Info,
   MapPin,
 } from 'lucide-react';
@@ -497,7 +496,7 @@ export const ParkVehicle: React.FC = () => {
           <div className="bg-white rounded-xl border border-slate-200 shadow-2xs p-5 space-y-3">
             <div className="flex items-center justify-between">
               <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600 flex items-center gap-1.5">
-                <Sparkles className="w-4 h-4 text-amber-500" />
+                <Car className="w-4 h-4 text-blue-600" />
                 <span>Quick-Fill Test Vehicles</span>
               </h3>
               <span className="text-[10px] text-slate-400">1-click populate</span>

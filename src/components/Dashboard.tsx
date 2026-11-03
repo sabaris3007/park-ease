@@ -13,7 +13,6 @@ import {
   Clock,
   Search,
   ExternalLink,
-  Sparkles,
   AlertTriangle,
   Tag,
   Compass,

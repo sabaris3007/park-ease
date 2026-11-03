@@ -18,7 +18,7 @@ import {
   Bike,
   Car,
   Truck,
-  Sparkles,
+  Compass,
 } from 'lucide-react';
 
 const MainContent: React.FC = () => {
@@ -34,7 +34,7 @@ const MainContent: React.FC = () => {
         <div className="bg-gradient-to-r from-blue-600 via-indigo-600 to-blue-700 text-white text-xs py-2 px-4 shadow-xs">
           <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-center sm:text-left">
-              <Sparkles className="w-4 h-4 text-amber-300 shrink-0" />
+              <Compass className="w-4 h-4 text-blue-200 shrink-0" />
               <span>
                 <strong>Welcome to ParkEase!</strong> Browse nearby parking hubs, check real-time bay availability, or sign in to save your vehicles.
               </span>
